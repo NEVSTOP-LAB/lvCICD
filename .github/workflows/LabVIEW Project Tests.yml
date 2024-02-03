@@ -21,7 +21,7 @@ jobs:
         shell: powershell
 
       - name: Run lvCICD Test cases with VITester
-        uses: NEVSTOP-LAB/lvCICD@improvement-20140103
+        uses: NEVSTOP-LAB/lvCICD@main
         with:
           Operation: StartVITester
           Parameter1: ${{ github.workspace }}\LabVIEW-Adapter\CICD-LabVIEW-Adapter.lvproj
