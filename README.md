@@ -15,7 +15,7 @@ You can use **`lvCICD`** to:
 4. *Install/uninstall VIPM libraries(vip)*
 5. *Apply VIPM VIPC file(vipc)*
 6. *Setup Large LabVIEW build facility*
-8. *Add your own operation, [Click link to see how to contribute to it](docs/How-to-contribute.md)*
+7. *Add your own operation, [Click link to see how to contribute to it](docs/How-to-contribute.md)*
 
 Check [**lvCICD Operation-List**](docs/Operation-List.md) for operations of `lvCICD`.
 
