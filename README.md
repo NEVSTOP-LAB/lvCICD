@@ -34,7 +34,6 @@ Check [**lvCICD Operation-List**](docs/Operation-List.md) for operations of `lvC
 - Only `10` Parameters could be defined
 - The name of parameter is not intuitive due to limitation of github customer action. Check the Operation List for what it stands for.
 - Path definition. You can use `[GLOBAL_MACRO]` in relative path parameter.
-
   Available `GLOBAL_MACRO`:
   - `vi.lib`: vi.lib folder of LabVIEW
   - `user.lib`: user.lib folder of LabVIEW
@@ -49,6 +48,32 @@ Check [**lvCICD Operation-List**](docs/Operation-List.md) for operations of `lvC
     - ***[vi.lib]\Utility\error.llb*** --> ***"C:\Program Files (x86)\National Instruments\LabVIEW 2019\vi.lib\Utility\error.llb"***
   - If set ***"SyncPath=C:\Sync"*** in **Environment Variables**
     - ***[SyncPath]\abc.txt*** --> ***"C:\Sync\abc.txt"***
+
+### Troubleshooting: LabVIEWCLI `Error code : 66`
+
+On loaded self-hosted runners (especially when several LabVIEW CI jobs run
+concurrently on the same machine), `LabVIEWCLI` can fail with
+`Error code : 66` — `RunExecuteOperationVI.vi ... ProxyCaller 中的通信调用错误`
+(communication call error in ProxyCaller) — even though the operation itself
+is fine. This is a startup timing race: LabVIEW's VI Server is not ready yet
+when LabVIEWCLI tries to call into it, and the connection succeeds a moment
+later. Rerunning the workflow usually passes.
+
+`lvCICD` handles this automatically since the robustness fix:
+
+1. If the LabVIEW VI Server port is already open (e.g. a previous step left
+   LabVIEW running), the running instance is reused instead of starting a
+   second LabVIEW process.
+2. Otherwise LabVIEW is started and the script polls the VI Server port until
+   it accepts connections (instead of a fixed 10 s sleep), up to
+   `StartupTimeout` seconds.
+3. If `LabVIEWCLI` still fails with `Error code : 66`, the call is retried up
+   to `MaxRetries` times with `RetryDelay` seconds between attempts.
+
+Only the transient `Error code : 66` is retried. Real operation failures
+(e.g. broken VIs detected, build errors, failing test cases) fail the step
+immediately without retries. All three settings are configurable via the
+`StartupTimeout` / `MaxRetries` / `RetryDelay` action inputs.
 
 ## Pre-works
 
@@ -97,6 +122,9 @@ Add this customer-action to `steps` session in github actions yml file.
         LabVIEW_Version: [optional, LabVIEW_version,2019 or Later,2019 as default]
         Architecture: [optional, x86 or x64, x86 as default]
         OperationVIFolder: [optional, use lvCICD action path as default, set to ${{ github.workspace }} for searching operations in your repo]
+        StartupTimeout: [optional, max seconds to wait for the LabVIEW VI Server port to accept connections before invoking LabVIEWCLI, 120 as default]
+        MaxRetries: [optional, how many times to retry LabVIEWCLI when it fails with the transient error code 66, 3 as default]
+        RetryDelay: [optional, seconds to wait between error-66 retries, 10 as default]
 
 **Example 1**: use `lvEcho` to check runner/agent ready for lvCICD tools.
 
