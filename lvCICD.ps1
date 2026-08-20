@@ -1,7 +1,13 @@
 # Determine script location for PowerShell
 
-# This script must always run to completion and exit with the LabVIEWCLI exit
-# code, so pin the error action preference regardless of the caller's setting.
+# This script must always run to completion and leave $LASTEXITCODE (set by
+# LabVIEWCLI) untouched, so that the caller can propagate it. Pin the error
+# action preference regardless of the caller's setting. Note: do NOT call
+# `exit` at the end of this script -- when this script is invoked directly
+# from a GitHub composite action (or an Azure DevOps inline task), `exit`
+# would terminate the caller's PowerShell session before it can read
+# output.txt / write outputs. The early `exit 1` below is intentional: it
+# only fires when the environment is broken (LabVIEWCLI missing).
 $ErrorActionPreference = 'Continue'
 
 
@@ -67,15 +73,21 @@ if ( -not (Get-Command LabVIEWCLI -ErrorAction SilentlyContinue) ) {
 
 # Helper: test whether the LabVIEW VI Server TCP port is accepting connections.
 function Test-LvPortOpen([int]$Port, [int]$TimeoutMs = 1000) {
+    $client = $null
     try {
         $client = New-Object System.Net.Sockets.TcpClient
         $result = $client.BeginConnect('127.0.0.1', $Port, $null, $null)
         $opened = $result.AsyncWaitHandle.WaitOne($TimeoutMs, $false)
         if ( $opened ) { $client.EndConnect($result) }
-        $client.Close()
         return $opened
     } catch {
+        # Note: when the port is closed, the TCP connect is refused and
+        # EndConnect throws -- this is the COMMON case while LabVIEW is still
+        # starting up, so the client must be released here as well.
         return $false
+    } finally {
+        # Always release the socket + wait handle, even on the throw path.
+        if ( $client ) { $client.Close() }
     }
 }
 
@@ -187,4 +199,7 @@ Write-Host "lvCICD output is saved to ""$outputVFile"""
 $Result = Get-Content -Path "$outputVFile" -ErrorAction SilentlyContinue;
 Write-Host "Result=$Result";
 
-exit $exitCode
+# Intentionally NO `exit` here: LabVIEWCLI's exit code is still in
+# $LASTEXITCODE and the caller (GitHub composite action / Azure DevOps task)
+# propagates it after reading this script's output. Exiting here would
+# terminate the caller's PowerShell session before it can read output.txt.
