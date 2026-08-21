@@ -123,7 +123,7 @@ function Ensure-LvServerUp([int]$Port, [string]$LabVIEWExePath, [int]$StartupTim
     if ( $ready ) {
         Write-Host "LabVIEW VI Server is ready on port $Port."
     } else {
-        Write-Warning "LabVIEW VI Server did not become ready within ${StartupTimeout}s. Proceeding anyway; LabVIEWCLI may still fail to connect (error 66 will be retried)."
+        Write-Warning "LabVIEW VI Server did not become ready within ${StartupTimeout}s. Proceeding anyway; LabVIEWCLI may still fail to connect (transient error 66 / -350000 will be retried)."
     }
 }
 
@@ -215,6 +215,10 @@ $LabVIEWCLIArgs = @(
 # test cases) exit non-zero as well, but must NOT be retried, so the retry
 # triggers only on the signatures above.
 $retryableErrorCodes = @('66', '-350000')
+$transientErrorDescriptions = @{
+    '66'      = 'communication call error in ProxyCaller'
+    '-350000' = 'failed to establish a connection with LabVIEW (VI Server not ready yet)'
+}
 $attempt = 1
 $exitCode = 0
 $lastOutput = @()
@@ -265,15 +269,24 @@ while ( $true ) {
     # Escalation: if error 66 keeps repeating, the shared LabVIEW instance's
     # proxy channel is likely broken and simple retries will never recover.
     # Restart LabVIEW (fresh instance) before the next attempt.
-    if ( $hitCode -eq '66' ) { $consecutive66 = $consecutive66 + 1 }
-    if ( $hitCode -eq '66' -and $RestartOnError66 -eq 'true' -and $consecutive66 -ge [int]$RestartAfterFailures ) {
-        Restart-LabVIEW $PortNum $LabVIEWExePath ([int]$StartupTimeout)
-        $restartCount = $restartCount + 1
+    # NOTE: $consecutive66 counts ONLY consecutive error-66 failures; any
+    # other transient error (e.g. -350000) resets the counter, so the
+    # RestartAfterFailures threshold means what it says.
+    if ( $hitCode -eq '66' ) {
+        $consecutive66 = $consecutive66 + 1
+        if ( $RestartOnError66 -eq 'true' -and $consecutive66 -ge [int]$RestartAfterFailures ) {
+            Restart-LabVIEW $PortNum $LabVIEWExePath ([int]$StartupTimeout)
+            $restartCount = $restartCount + 1
+            $consecutive66 = 0
+        }
+    } else {
         $consecutive66 = 0
     }
 
     Write-Host ""
-    Write-Warning "LabVIEWCLI hit the transient error code $hitCode (communication call error in ProxyCaller). Retrying in ${RetryDelay}s ..."
+    $transientDesc = $transientErrorDescriptions[$hitCode]
+    if ( -not $transientDesc ) { $transientDesc = 'transient communication error' }
+    Write-Warning "LabVIEWCLI hit the transient error code $hitCode ($transientDesc). Retrying in ${RetryDelay}s ..."
     Start-Sleep -Seconds ([int]$RetryDelay)
     $attempt = $attempt + 1
 }
