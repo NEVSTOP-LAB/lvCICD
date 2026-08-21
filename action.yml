@@ -74,6 +74,14 @@ inputs:
     description: "Seconds to wait between error-66 retries"
     required: false
     default: "10"
+  RestartOnError66:
+    description: "When error 66 keeps repeating, restart LabVIEW (kill all LabVIEW/LabVIEWCLI processes and start a fresh instance) before retrying. Set to false if the machine runs several concurrent jobs that must not be disturbed."
+    required: false
+    default: "true"
+  RestartAfterFailures:
+    description: "Consecutive error-66 failures before triggering the LabVIEW restart escalation"
+    required: false
+    default: "2"
 outputs:
   Result:
     description: "Output of lvCICD"
@@ -119,7 +127,9 @@ runs:
         $Parameter10 `
         "${{ inputs.StartupTimeout }}" `
         "${{ inputs.MaxRetries }}" `
-        "${{ inputs.RetryDelay }}" ;
+        "${{ inputs.RetryDelay }}" `
+        "${{ inputs.RestartOnError66 }}" `
+        "${{ inputs.RestartAfterFailures }}" ;
         $Result=Get-Content -Path "${{ github.action_path }}\output.txt";
         echo "Result=$Result" >> $env:GITHUB_OUTPUT
         # Propagate LabVIEWCLI's exit code (lvCICD.ps1 intentionally does not
