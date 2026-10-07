@@ -349,8 +349,10 @@ while ( $true ) {
     # NOTE: $consecutive66 counts ONLY consecutive error-66 failures; any
     # other transient error (e.g. -350000) resets the counter, so the
     # RestartAfterFailures threshold means what it says.
+    # Both transient signatures are instance-level failures, so the state of the
+    # targeted instance is reported before the retry decision.
+    Write-LvInstanceDiagnostics $PortNum $LabVIEWExePath
     if ( $hitCode -eq '66' ) {
-        Write-LvInstanceDiagnostics $PortNum $LabVIEWExePath
         $consecutive66 = $consecutive66 + 1
         if ( $RestartOnError66 -eq 'true' -and $consecutive66 -ge [int]$RestartAfterFailures ) {
             if ( Restart-LabVIEW $PortNum $LabVIEWExePath ([int]$StartupTimeout) ) {
