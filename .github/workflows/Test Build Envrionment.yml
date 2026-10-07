@@ -33,7 +33,7 @@ jobs:
 
       - name: TestEnvironment
         id: lvEcho
-        uses: NEVSTOP-LAB/lvCICD@main
+        uses: ./
         with:
           Operation: lvEcho
           Parameter1: "line1"
