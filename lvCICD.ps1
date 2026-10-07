@@ -40,14 +40,13 @@ $Parameter10 = $args[13]; #if ( $Parameter10 ) { $Parameter10 = "'$Parameter10'"
 #   StartupTimeout:      max seconds to wait for the LabVIEW VI Server port to accept connections
 #   MaxRetries:          how many times to retry LabVIEWCLI when it fails with the transient error code 66
 #   RetryDelay:          seconds to wait between error-66 retries
-#   RestartOnError66:    restart LabVIEW (kill all LabVIEW/LabVIEWCLI processes, start a fresh
-#                        instance) when error 66 repeats -- a long-lived shared LabVIEW instance
-#                        whose proxy channel is broken does not recover by simple retries
-#   RestartAfterFailures: consecutive error-66 failures before triggering the LabVIEW restart
+#   RestartOnError66:    stop the process holding the VI Server port and start a fresh
+#                        LabVIEW instance when error 66 repeats
+#   RestartAfterFailures: consecutive error-66 failures before triggering the restart
 $StartupTimeout = $args[14]; if($StartupTimeout){} else {$StartupTimeout = 120}
 $MaxRetries = $args[15]; if($MaxRetries){} else {$MaxRetries = 3}
 $RetryDelay = $args[16]; if($RetryDelay){} else {$RetryDelay = 10}
-$RestartOnError66 = $args[17]; if($RestartOnError66){} else {$RestartOnError66 = 'true'}
+$RestartOnError66 = $args[17]; if($RestartOnError66){} else {$RestartOnError66 = 'false'}
 $RestartAfterFailures = $args[18]; if($RestartAfterFailures){} else {$RestartAfterFailures = 2}
 
 Write-Host "LabVIEW_Version = $LabVIEW_Version"
@@ -99,11 +98,38 @@ function Test-LvPortOpen([int]$Port, [int]$TimeoutMs = 1000) {
     }
 }
 
+# Helper: the process that listens on the VI Server TCP port.
+function Get-VIPortOwner([int]$Port) {
+    $conn = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ( -not $conn ) { return $null }
+    return Get-Process -Id $conn.OwningProcess -ErrorAction SilentlyContinue
+}
+
+# Helper: the port accepts connections and is hosted by the LabVIEW build this
+# request targets. A listening port does not by itself identify its owner:
+# another process holding the port keeps LabVIEW from binding it, and a port
+# held by a different LabVIEW build is not the instance this request may drive.
+function Test-LvServerReady([int]$Port, [string]$LabVIEWExePath, [switch]$Quiet) {
+    if ( -not (Test-LvPortOpen $Port) ) { return $false }
+    $owner = Get-VIPortOwner $Port
+    if ( -not $owner ) {
+        if ( -not $Quiet ) { Write-Warning "Port $Port accepts connections but its owning process cannot be resolved. The port is treated as not ready." }
+        return $false
+    }
+    if ( $owner.Path -and ($owner.Path -ieq $LabVIEWExePath) ) { return $true }
+    if ( -not $owner.Path -and ($owner.ProcessName -ieq 'LabVIEW') ) {
+        if ( -not $Quiet ) { Write-Warning "Port $Port is held by LabVIEW (PID $($owner.Id)); its executable path is not readable and it is accepted as $LabVIEWExePath." }
+        return $true
+    }
+    if ( -not $Quiet ) { Write-Warning "Port $Port is held by $($owner.ProcessName) (PID $($owner.Id), $($owner.Path)) instead of $LabVIEWExePath." }
+    return $false
+}
+
 # Ensure LabVIEW is running and its VI Server port is accepting connections.
 # Reuses a running instance when possible; otherwise starts LabVIEW and polls
 # the VI Server port until it is ready (or StartupTimeout expires).
 function Ensure-LvServerUp([int]$Port, [string]$LabVIEWExePath, [int]$StartupTimeout) {
-    $ready = Test-LvPortOpen $Port
+    $ready = Test-LvServerReady $Port $LabVIEWExePath
     if ( $ready ) {
         Write-Host "LabVIEW VI Server is already listening on port $Port. Reusing the running LabVIEW instance."
         return
@@ -118,7 +144,7 @@ function Ensure-LvServerUp([int]$Port, [string]$LabVIEWExePath, [int]$StartupTim
     $deadline = (Get-Date).AddSeconds($StartupTimeout)
     while ( -not $ready -and (Get-Date) -lt $deadline ) {
         Start-Sleep -Seconds 2
-        $ready = Test-LvPortOpen $Port
+        $ready = Test-LvServerReady $Port $LabVIEWExePath -Quiet
     }
     if ( $ready ) {
         Write-Host "LabVIEW VI Server is ready on port $Port."
@@ -127,21 +153,29 @@ function Ensure-LvServerUp([int]$Port, [string]$LabVIEWExePath, [int]$StartupTim
     }
 }
 
-# Kill every LabVIEW / LabVIEWCLI process on the machine and start a fresh
-# LabVIEW instance. Used when error 66 repeats: a long-lived shared LabVIEW
-# instance (left running by earlier steps / previous runs) can end up with a
-# broken proxy channel that simple retries never recover. A fresh instance
-# gives LabVIEWCLI a clean communication channel.
-# NOTE: this kills ALL LabVIEW.exe processes on the machine. Set the
-# RestartOnError66 action input to "false" if the machine runs several
-# concurrent jobs that must not be disturbed.
+# Stop the process that holds the given VI Server port and start a fresh
+# LabVIEW instance for that port. Used when error 66 repeats.
+# Only the process listening on $Port is stopped: other LabVIEW builds and VI
+# Server instances on the same machine keep running. Returns $true when the
+# instance was restarted. A running LabVIEWCLI process means another job is
+# calling into the same instance, and stopping it would fail that job, so the
+# restart is skipped in that case.
 function Restart-LabVIEW([int]$Port, [string]$LabVIEWExePath, [int]$StartupTimeout) {
     Write-Host ""
-    Write-Host "==== Repeated error 66: restarting LabVIEW to clear the broken proxy channel ===="
-    Write-Host "Stopping all LabVIEW processes ..."
-    Get-Process -Name LabVIEW -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-    Write-Host "Stopping lingering LabVIEWCLI processes ..."
-    Get-Process -Name LabVIEWCLI -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Write-Host "==== Repeated error 66: restarting the VI Server instance on port $Port ===="
+    $otherCli = @(Get-Process -Name LabVIEWCLI -ErrorAction SilentlyContinue)
+    if ( $otherCli.Count -gt 0 ) {
+        Write-Warning "Skipped the restart: $($otherCli.Count) LabVIEWCLI process(es) are running and may be calling into the same VI Server instance."
+        return $false
+    }
+    $owner = Get-VIPortOwner $Port
+    if ( $owner ) {
+        Write-Host "Stopping $($owner.ProcessName) (PID $($owner.Id)) holding port $Port ..."
+        Stop-Process -Id $owner.Id -Force -ErrorAction SilentlyContinue
+        Wait-Process -Id $owner.Id -Timeout 60 -ErrorAction SilentlyContinue
+    } else {
+        Write-Host "No process is listening on port $Port."
+    }
 
     # Wait until the VI Server port is actually released by the old instance.
     Write-Host "Waiting for VI Server port $Port to be released ..."
@@ -158,7 +192,7 @@ function Restart-LabVIEW([int]$Port, [string]$LabVIEWExePath, [int]$StartupTimeo
     $deadline = (Get-Date).AddSeconds($StartupTimeout)
     while ( -not $ready -and (Get-Date) -lt $deadline ) {
         Start-Sleep -Seconds 2
-        $ready = Test-LvPortOpen $Port
+        $ready = Test-LvServerReady $Port $LabVIEWExePath -Quiet
     }
     if ( $ready ) {
         Write-Host "Fresh LabVIEW VI Server is ready on port $Port."
@@ -166,16 +200,62 @@ function Restart-LabVIEW([int]$Port, [string]$LabVIEWExePath, [int]$StartupTimeo
         Write-Warning "Fresh LabVIEW VI Server did not become ready within ${StartupTimeout}s. Proceeding anyway."
     }
     Write-Host "==== LabVIEW restart done ===="
+    return $true
+}
+
+# Report the state of the VI Server instance the request targets, plus every
+# LabVIEW / LabVIEWCLI process on the machine. One VI Server instance per
+# LabVIEW build is shared by every job on the machine, so these values tell
+# apart "the instance is gone" from "another job drives the same instance".
+function Write-LvInstanceDiagnostics([int]$Port, [string]$LabVIEWExePath) {
+    Write-Host "---- VI Server diagnostics ----"
+    Write-Host "Port $Port accepts connections: $(Test-LvPortOpen $Port)"
+    $owner = Get-VIPortOwner $Port
+    if ( $owner ) {
+        Write-Host "Port $Port owner: $($owner.ProcessName) (PID $($owner.Id), $($owner.Path))"
+    } else {
+        Write-Host "Port $Port has no listening process."
+    }
+    Write-Host "Expected LabVIEW: $LabVIEWExePath"
+    $lvs = @(Get-Process -Name LabVIEW -ErrorAction SilentlyContinue)
+    if ( $lvs.Count -eq 0 ) {
+        Write-Host "LabVIEW processes: none"
+    } else {
+        $lvs | ForEach-Object { Write-Host "LabVIEW process: PID $($_.Id) $($_.Path)" }
+    }
+    $clis = @(Get-Process -Name LabVIEWCLI -ErrorAction SilentlyContinue)
+    if ( $clis.Count -eq 0 ) {
+        Write-Host "LabVIEWCLI processes: none"
+    } else {
+        $clis | ForEach-Object { Write-Host "LabVIEWCLI process: PID $($_.Id)" }
+    }
+}
+
+# List the files named "<Operation>.vi" below the operation folder. LabVIEW
+# locates the operation VI by name under that folder, so every match is a
+# candidate and extra copies are reported instead of being picked silently.
+function Show-OperationVICandidates([string]$SearchRoot, [string]$Operation) {
+    if ( -not (Test-Path -LiteralPath $SearchRoot) ) {
+        Write-Warning "Operation folder ""$SearchRoot"" does not exist; the operation VI ""$Operation.vi"" cannot be located."
+        return
+    }
+    $candidates = @(Get-ChildItem -LiteralPath $SearchRoot -Filter "$Operation.vi" -Recurse -File -ErrorAction SilentlyContinue)
+    if ( $candidates.Count -eq 0 ) {
+        Write-Warning "No ""$Operation.vi"" exists below ""$SearchRoot""; the operation VI cannot be located."
+    } elseif ( $candidates.Count -eq 1 ) {
+        Write-Host "Operation VI: $($candidates[0].FullName)"
+    } else {
+        Write-Warning "$($candidates.Count) files named ""$Operation.vi"" exist below ""$SearchRoot""; which one is used is decided by LabVIEW:"
+        $candidates | ForEach-Object { Write-Host "    $($_.FullName)" }
+    }
 }
 
 # Start LabVIEW Process to ensure TCP Port of VI Server is active.
-# If the VI Server port is already accepting connections (e.g. a previous
-# step left LabVIEW running on the runner), reuse the running instance
-# instead of starting a second one. Two LabVIEW instances fighting for the
-# same VI Server port is one of the root causes of the transient LabVIEWCLI
-# "Error code : 66" (communication call error in ProxyCaller) seen on
-# self-hosted runners.
+# If the VI Server port is already hosted by the targeted LabVIEW build (e.g.
+# a previous step left LabVIEW running on the runner), the running instance is
+# reused instead of starting a second one.
 Ensure-LvServerUp $PortNum $LabVIEWExePath ([int]$StartupTimeout)
+Show-OperationVICandidates $OperationVIPath $Operation
 
 $lvCICDVIPath = "$lvCICD_Tool_dir\LabVIEW-Adapter\lvCICD.vi"
 $outputVFile = "$lvCICD_Tool_dir\output.txt"
@@ -205,10 +285,7 @@ $LabVIEWCLIArgs = @(
 # Retryable signatures (from LabVIEWCLI console output):
 #   "Error code : 66"       - communication call error in ProxyCaller: the
 #                             proxy call to the running LabVIEW failed, even
-#                             though the TCP connection works. Usually a
-#                             timing race, but it can also mean the long-lived
-#                             shared LabVIEW instance is broken (see restart
-#                             escalation below).
+#                             though the TCP connection works.
 #   "Error code : -350000"  - the CLI failed to establish a connection with
 #                             LabVIEW (VI Server not ready yet).
 # Real operation failures (e.g. broken VIs detected, build errors, failing
@@ -273,10 +350,12 @@ while ( $true ) {
     # other transient error (e.g. -350000) resets the counter, so the
     # RestartAfterFailures threshold means what it says.
     if ( $hitCode -eq '66' ) {
+        Write-LvInstanceDiagnostics $PortNum $LabVIEWExePath
         $consecutive66 = $consecutive66 + 1
         if ( $RestartOnError66 -eq 'true' -and $consecutive66 -ge [int]$RestartAfterFailures ) {
-            Restart-LabVIEW $PortNum $LabVIEWExePath ([int]$StartupTimeout)
-            $restartCount = $restartCount + 1
+            if ( Restart-LabVIEW $PortNum $LabVIEWExePath ([int]$StartupTimeout) ) {
+                $restartCount = $restartCount + 1
+            }
             $consecutive66 = 0
         }
     } else {

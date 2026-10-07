@@ -51,42 +51,39 @@ Check [**lvCICD Operation-List**](docs/Operation-List.md) for operations of `lvC
 
 ### Troubleshooting: LabVIEWCLI `Error code : 66`
 
-On loaded self-hosted runners (especially when several LabVIEW CI jobs run
-concurrently on the same machine), `LabVIEWCLI` can fail with
-`Error code : 66` — `RunExecuteOperationVI.vi ... ProxyCaller 中的通信调用错误`
-(communication call error in ProxyCaller) — even though the operation itself
-is fine. This is a startup timing race: LabVIEW's VI Server is not ready yet
-when LabVIEWCLI tries to call into it, and the connection succeeds a moment
-later. Rerunning the workflow usually passes.
+`LabVIEWCLI` reports `Error code : 66` —
+`RunExecuteOperationVI.vi ... ProxyCaller 中的通信调用错误`
+(communication call error in ProxyCaller) — immediately after printing
+`Connection established with LabVIEW at port number ...`. The VI Server port
+answers, but the proxy call into that LabVIEW instance fails.
 
-`lvCICD` handles this automatically since the robustness fix:
+How `lvCICD` handles it:
 
-1. If the LabVIEW VI Server port is already open (e.g. a previous step left
-   LabVIEW running), the running instance is reused instead of starting a
-   second LabVIEW process.
-2. Otherwise LabVIEW is started and the script polls the VI Server port until
-   it accepts connections (instead of a fixed 10 s sleep), up to
-   `StartupTimeout` seconds.
-3. If `LabVIEWCLI` still fails with `Error code : 66` (or the connect error
-   `-350000`), the call is retried up to `MaxRetries` times with `RetryDelay`
-   seconds between attempts.
-4. **Restart escalation**: when `Error code : 66` keeps repeating (default:
-   after 2 consecutive failures), the long-lived shared LabVIEW instance's
-   proxy channel is likely broken and simple retries never recover. `lvCICD`
-   then kills all LabVIEW / LabVIEWCLI processes, waits for the VI Server port
-   to be released, starts a fresh LabVIEW instance and retries the operation.
-   This is the fix for the case where the same operation fails with error 66
-   on every attempt while earlier steps of the job succeeded.
+1. The VI Server port is reused only when it is hosted by the LabVIEW build
+the request targets. Otherwise LabVIEW is started and the script polls the port
+until it is ready (instead of a fixed 10 s sleep), up to `StartupTimeout`
+seconds.
+2. `Error code : 66` and the connect error `-350000` are retried up to
+`MaxRetries` times, `RetryDelay` seconds apart. Every other failure (broken
+VIs detected, build errors, failing test cases) fails the step immediately
+without retries.
+3. With `RestartOnError66: true`, a repeating `Error code : 66` (after
+`RestartAfterFailures` consecutive failures) makes the script stop the process
+that holds the VI Server port, wait for the port to be released, start a fresh
+LabVIEW instance and retry.
 
-Only the transient communication errors (`Error code : 66` and `-350000`) are
-retried. Real operation failures (e.g. broken VIs detected, build errors,
-failing test cases) fail the step immediately without retries. The behavior
-is configurable via the `StartupTimeout` / `MaxRetries` / `RetryDelay` /
-`RestartOnError66` / `RestartAfterFailures` action inputs.
+> [!NOTE]
+> One VI Server instance per LabVIEW build is shared by every job on the
+> machine, so an `Error code : 66` that reproduces on every attempt is
+> reproduced by that sharing: the shared instance is stopped or restarted by
+> another job while this job is calling into it. Keep one LabVIEW CI job
+> running at a time on a self-hosted runner, and leave `RestartOnError66` at
+> its default (`false`). Enable it only on a runner that runs a single job at a
+time.
 
-> **Note**: the restart escalation kills **all** LabVIEW.exe processes on the
-> machine. If the machine runs several concurrent CI jobs that share LabVIEW,
-> set `RestartOnError66: false` in the workflow.
+> [!WARNING]
+> Restarting a VI Server instance interrupts every job that shares it,
+> including jobs of other repositories on the same runner.
 
 ## Pre-works
 
@@ -138,8 +135,8 @@ Add this customer-action to `steps` session in github actions yml file.
         StartupTimeout: [optional, max seconds to wait for the LabVIEW VI Server port to accept connections before invoking LabVIEWCLI, 120 as default]
         MaxRetries: [optional, how many times to retry LabVIEWCLI when it fails with the transient error code 66, 3 as default]
         RetryDelay: [optional, seconds to wait between error-66 retries, 10 as default]
-        RestartOnError66: [optional, restart LabVIEW (kill all LabVIEW/LabVIEWCLI processes, start a fresh instance) when error 66 keeps repeating, true as default]
-        RestartAfterFailures: [optional, consecutive error-66 failures before triggering the LabVIEW restart, 2 as default]
+        RestartOnError66: [optional, stop the process holding the VI Server port and start a fresh LabVIEW instance when error 66 keeps repeating, false as default]
+        RestartAfterFailures: [optional, consecutive error-66 failures before the restart, 2 as default]
 
 **Example 1**: use `lvEcho` to check runner/agent ready for lvCICD tools.
 

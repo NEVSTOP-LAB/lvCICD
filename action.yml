@@ -75,9 +75,9 @@ inputs:
     required: false
     default: "10"
   RestartOnError66:
-    description: "When error 66 keeps repeating, restart LabVIEW (kill all LabVIEW/LabVIEWCLI processes and start a fresh instance) before retrying. Set to false if the machine runs several concurrent jobs that must not be disturbed."
+    description: "When error 66 keeps repeating, stop the process holding the VI Server port and start a fresh LabVIEW instance before retrying. Restarting a VI Server instance also interrupts concurrent jobs that share it, so this is off by default."
     required: false
-    default: "true"
+    default: "false"
   RestartAfterFailures:
     description: "Consecutive error-66 failures before triggering the LabVIEW restart escalation"
     required: false
