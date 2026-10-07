@@ -42,12 +42,15 @@ $Parameter10 = $args[13]; #if ( $Parameter10 ) { $Parameter10 = "'$Parameter10'"
 #   RetryDelay:          seconds to wait between error-66 retries
 #   RestartOnError66:    stop the process holding the VI Server port and start a fresh
 #                        LabVIEW instance when error 66 repeats
-#   RestartAfterFailures: consecutive error-66 failures before triggering the restart
+#   RestartAfterFailures: consecutive transient failures before triggering the restart
+#   RestartOnConnectFailure: same restart for the connect error -350000, where the port is
+#                        held by a process that is not the VI Server this request targets
 $StartupTimeout = $args[14]; if($StartupTimeout){} else {$StartupTimeout = 120}
 $MaxRetries = $args[15]; if($MaxRetries){} else {$MaxRetries = 3}
 $RetryDelay = $args[16]; if($RetryDelay){} else {$RetryDelay = 10}
 $RestartOnError66 = $args[17]; if($RestartOnError66){} else {$RestartOnError66 = 'false'}
 $RestartAfterFailures = $args[18]; if($RestartAfterFailures){} else {$RestartAfterFailures = 2}
+$RestartOnConnectFailure = $args[19]; if($RestartOnConnectFailure){} else {$RestartOnConnectFailure = 'true'}
 
 Write-Host "LabVIEW_Version = $LabVIEW_Version"
 Write-Host "Architecture = $Architecture"
@@ -70,6 +73,7 @@ Write-Host "MaxRetries = $MaxRetries"
 Write-Host "RetryDelay = $RetryDelay"
 Write-Host "RestartOnError66 = $RestartOnError66"
 Write-Host "RestartAfterFailures = $RestartAfterFailures"
+Write-Host "RestartOnConnectFailure = $RestartOnConnectFailure"
 
 # Check LabVIEWCLI is available before doing anything else, so that we fail
 # fast with a clear message instead of looping through retries.
@@ -134,6 +138,15 @@ function Ensure-LvServerUp([int]$Port, [string]$LabVIEWExePath, [int]$StartupTim
         Write-Host "LabVIEW VI Server is already listening on port $Port. Reusing the running LabVIEW instance."
         return
     }
+    # A port that is already held cannot be bound by a new LabVIEW instance, so
+    # starting one and waiting for the port would only spend the full
+    # StartupTimeout. LabVIEWCLI reports the failure as -350000 and the restart
+    # escalation releases the port.
+    $owner = Get-VIPortOwner $Port
+    if ( $owner -and (($owner.ProcessName -ine 'LabVIEW') -or ($owner.Path -and ($owner.Path -ine $LabVIEWExePath))) ) {
+        Write-Warning "Port $Port is held by $($owner.ProcessName) (PID $($owner.Id), $($owner.Path)). No LabVIEW instance is started while the port is held."
+        return
+    }
     Write-Host "Start-Process -FilePath ""$LabVIEWExePath"""
     Start-Process -FilePath "$LabVIEWExePath"
     # Wait until LabVIEW is actually up (VI Server port open) instead of a
@@ -154,7 +167,7 @@ function Ensure-LvServerUp([int]$Port, [string]$LabVIEWExePath, [int]$StartupTim
 }
 
 # Stop the process that holds the given VI Server port and start a fresh
-# LabVIEW instance for that port. Used when error 66 repeats.
+# LabVIEW instance for that port. Used when a transient failure repeats.
 # Only the process listening on $Port is stopped: other LabVIEW builds and VI
 # Server instances on the same machine keep running. Returns $true when the
 # instance was restarted. A running LabVIEWCLI process means another job is
@@ -162,7 +175,7 @@ function Ensure-LvServerUp([int]$Port, [string]$LabVIEWExePath, [int]$StartupTim
 # restart is skipped in that case.
 function Restart-LabVIEW([int]$Port, [string]$LabVIEWExePath, [int]$StartupTimeout) {
     Write-Host ""
-    Write-Host "==== Repeated error 66: restarting the VI Server instance on port $Port ===="
+    Write-Host "==== Restarting the VI Server instance on port $Port ===="
     $otherCli = @(Get-Process -Name LabVIEWCLI -ErrorAction SilentlyContinue)
     if ( $otherCli.Count -gt 0 ) {
         Write-Warning "Skipped the restart: $($otherCli.Count) LabVIEWCLI process(es) are running and may be calling into the same VI Server instance."
@@ -299,7 +312,7 @@ $transientErrorDescriptions = @{
 $attempt = 1
 $exitCode = 0
 $lastOutput = @()
-$consecutive66 = 0
+$consecutiveFailures = 0
 $restartCount = 0
 
 while ( $true ) {
@@ -350,18 +363,19 @@ while ( $true ) {
     # other transient error (e.g. -350000) resets the counter, so the
     # RestartAfterFailures threshold means what it says.
     # Both transient signatures are instance-level failures, so the state of the
-    # targeted instance is reported before the retry decision.
+    # targeted instance is reported before the retry decision. A restart is
+    # enabled per signature: error 66 means the instance answered but the proxy
+    # call failed, -350000 means the port is held by something that is not the
+    # VI Server this request targets.
     Write-LvInstanceDiagnostics $PortNum $LabVIEWExePath
-    if ( $hitCode -eq '66' ) {
-        $consecutive66 = $consecutive66 + 1
-        if ( $RestartOnError66 -eq 'true' -and $consecutive66 -ge [int]$RestartAfterFailures ) {
-            if ( Restart-LabVIEW $PortNum $LabVIEWExePath ([int]$StartupTimeout) ) {
-                $restartCount = $restartCount + 1
-            }
-            $consecutive66 = 0
+    $restartEnabled = ( $RestartOnConnectFailure -eq 'true' )
+    if ( $hitCode -eq '66' ) { $restartEnabled = ( $RestartOnError66 -eq 'true' ) }
+    $consecutiveFailures = $consecutiveFailures + 1
+    if ( $restartEnabled -and $consecutiveFailures -ge [int]$RestartAfterFailures ) {
+        if ( Restart-LabVIEW $PortNum $LabVIEWExePath ([int]$StartupTimeout) ) {
+            $restartCount = $restartCount + 1
         }
-    } else {
-        $consecutive66 = 0
+        $consecutiveFailures = 0
     }
 
     Write-Host ""
