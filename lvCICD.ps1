@@ -38,8 +38,9 @@ $Parameter10 = $args[13]; #if ( $Parameter10 ) { $Parameter10 = "'$Parameter10'"
 
 # Optional robustness settings (see action.yml inputs):
 #   StartupTimeout:      max seconds to wait for the LabVIEW VI Server port to accept connections
-#   MaxRetries:          how many times to retry LabVIEWCLI when it fails with the transient error code 66
-#   RetryDelay:          seconds to wait between error-66 retries
+#   MaxRetries:          how many times to retry LabVIEWCLI when it fails with a transient
+#                        communication error (error 66 / -350000)
+#   RetryDelay:          seconds to wait between transient-failure retries
 #   RestartOnError66:    stop the process holding the VI Server port and start a fresh
 #                        LabVIEW instance when error 66 repeats
 #   RestartAfterFailures: consecutive transient failures before triggering the restart
@@ -109,6 +110,16 @@ function Get-VIPortOwner([int]$Port) {
     return Get-Process -Id $conn.OwningProcess -ErrorAction SilentlyContinue
 }
 
+# Helper: whether the given process is a verified copy of the LabVIEW build
+# this request targets. Only an executable path that can be read and matches
+# the requested build is accepted: an unreadable path cannot be verified, and
+# reusing such an instance risks driving another LabVIEW build.
+function Test-LvOwnerIsTarget($Owner, [string]$LabVIEWExePath) {
+    if ( -not $Owner ) { return $false }
+    if ( -not $Owner.Path ) { return $false }
+    return ( $Owner.Path -ieq $LabVIEWExePath )
+}
+
 # Helper: the port accepts connections and is hosted by the LabVIEW build this
 # request targets. A listening port does not by itself identify its owner:
 # another process holding the port keeps LabVIEW from binding it, and a port
@@ -120,10 +131,10 @@ function Test-LvServerReady([int]$Port, [string]$LabVIEWExePath, [switch]$Quiet)
         if ( -not $Quiet ) { Write-Warning "Port $Port accepts connections but its owning process cannot be resolved. The port is treated as not ready." }
         return $false
     }
-    if ( $owner.Path -and ($owner.Path -ieq $LabVIEWExePath) ) { return $true }
+    if ( Test-LvOwnerIsTarget $owner $LabVIEWExePath ) { return $true }
     if ( -not $owner.Path -and ($owner.ProcessName -ieq 'LabVIEW') ) {
-        if ( -not $Quiet ) { Write-Warning "Port $Port is held by LabVIEW (PID $($owner.Id)); its executable path is not readable and it is accepted as $LabVIEWExePath." }
-        return $true
+        if ( -not $Quiet ) { Write-Warning "Port $Port is held by LabVIEW (PID $($owner.Id)) whose executable path is not readable, so it cannot be verified as $LabVIEWExePath. The port is treated as not ready." }
+        return $false
     }
     if ( -not $Quiet ) { Write-Warning "Port $Port is held by $($owner.ProcessName) (PID $($owner.Id), $($owner.Path)) instead of $LabVIEWExePath." }
     return $false
@@ -140,11 +151,13 @@ function Ensure-LvServerUp([int]$Port, [string]$LabVIEWExePath, [int]$StartupTim
     }
     # A port that is already held cannot be bound by a new LabVIEW instance, so
     # starting one and waiting for the port would only spend the full
-    # StartupTimeout. LabVIEWCLI reports the failure as -350000 and the restart
-    # escalation releases the port.
+    # StartupTimeout. An owner that is not a verified copy of the targeted
+    # LabVIEW build (another build, an unrelated service, an unreadable path)
+    # is reported and left alone: starting an instance would not release the
+    # port, and driving that instance is not this request's to do.
     $owner = Get-VIPortOwner $Port
-    if ( $owner -and (($owner.ProcessName -ine 'LabVIEW') -or ($owner.Path -and ($owner.Path -ine $LabVIEWExePath))) ) {
-        Write-Warning "Port $Port is held by $($owner.ProcessName) (PID $($owner.Id), $($owner.Path)). No LabVIEW instance is started while the port is held."
+    if ( $owner -and -not (Test-LvOwnerIsTarget $owner $LabVIEWExePath) ) {
+        Write-Warning "Port $Port is held by $($owner.ProcessName) (PID $($owner.Id), $($owner.Path)), which is not the targeted LabVIEW ($LabVIEWExePath). No LabVIEW instance is started while the port is held."
         return
     }
     Write-Host "Start-Process -FilePath ""$LabVIEWExePath"""
@@ -168,11 +181,17 @@ function Ensure-LvServerUp([int]$Port, [string]$LabVIEWExePath, [int]$StartupTim
 
 # Stop the process that holds the given VI Server port and start a fresh
 # LabVIEW instance for that port. Used when a transient failure repeats.
-# Only the process listening on $Port is stopped: other LabVIEW builds and VI
-# Server instances on the same machine keep running. Returns $true when the
-# instance was restarted. A running LabVIEWCLI process means another job is
-# calling into the same instance, and stopping it would fail that job, so the
-# restart is skipped in that case.
+# Only a process verified as the targeted LabVIEW build is stopped: another
+# LabVIEW build, an unrelated service holding the port and a process whose
+# executable path cannot be read are reported and left running. Returns $true
+# when the instance was restarted.
+#
+# The LabVIEWCLI process check below is a best-effort guard, not
+# synchronization: a job between two CLI invocations holds no LabVIEWCLI
+# process, and another job can start one right after the check. A VI Server
+# instance is shared by every job on the machine, so a restart can still
+# interrupt another job. Run one LabVIEW CI job at a time on a self-hosted
+# runner when the restart escalation is enabled.
 function Restart-LabVIEW([int]$Port, [string]$LabVIEWExePath, [int]$StartupTimeout) {
     Write-Host ""
     Write-Host "==== Restarting the VI Server instance on port $Port ===="
@@ -183,6 +202,10 @@ function Restart-LabVIEW([int]$Port, [string]$LabVIEWExePath, [int]$StartupTimeo
     }
     $owner = Get-VIPortOwner $Port
     if ( $owner ) {
+        if ( -not (Test-LvOwnerIsTarget $owner $LabVIEWExePath) ) {
+            Write-Warning "Skipped the restart: port $Port is held by $($owner.ProcessName) (PID $($owner.Id), $($owner.Path)), which cannot be verified as the targeted LabVIEW ($LabVIEWExePath). That process is left running."
+            return $false
+        }
         Write-Host "Stopping $($owner.ProcessName) (PID $($owner.Id)) holding port $Port ..."
         Stop-Process -Id $owner.Id -Force -ErrorAction SilentlyContinue
         Wait-Process -Id $owner.Id -Timeout 60 -ErrorAction SilentlyContinue

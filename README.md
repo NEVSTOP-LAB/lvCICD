@@ -64,10 +64,11 @@ LabVIEW build looks like.
 
 How `lvCICD` handles them:
 
-1. The VI Server port is reused only when it is hosted by the LabVIEW build
-the request targets. When the port is held by anything else, no LabVIEW
-instance is started and the port is not polled: a port that is already held
-cannot be bound by a new instance.
+1. The VI Server port is reused only when its owner is a verified copy of the
+LabVIEW build the request targets — the executable path must be readable and
+match. When the port is held by anything else, including a LabVIEW build whose
+executable path cannot be read, no LabVIEW instance is started and the port is
+not polled: a port that is already held cannot be bound by a new instance.
 2. Both signatures are retried up to `MaxRetries` times, `RetryDelay` seconds
 apart, and the state of the targeted instance is printed on every such failure
 (port owner, LabVIEW/LabVIEWCLI processes). Every other failure (broken VIs
@@ -78,8 +79,11 @@ failures: the process holding the VI Server port is stopped, the port is waited
 for, a fresh LabVIEW instance is started and the call is retried. It is on by
 default for `-350000` (`RestartOnConnectFailure`) and off by default for
 `Error code : 66` (`RestartOnError66`), which repeats because of instance
-sharing rather than a restartable state. When another LabVIEWCLI process is
-running, the restart is skipped.
+sharing rather than a restartable state. Only a process verified as the
+targeted LabVIEW build is stopped; another LabVIEW build, an unrelated service
+holding the port, and a process whose executable path cannot be read are
+reported and left running. When another LabVIEWCLI process is running, the
+restart is also skipped.
 
 > [!NOTE]
 > One VI Server instance per LabVIEW build is shared by every job on the
@@ -91,6 +95,12 @@ at a time on a self-hosted runner.
 > [!WARNING]
 > Restarting a VI Server instance interrupts every job that shares it,
 > including jobs of other repositories on the same runner.
+>
+> The "another LabVIEWCLI process is running" check that guards the restart is
+> best effort, not synchronization: a job between two CLI invocations holds no
+> LabVIEWCLI process, and another job can start one right after the check. The
+> restart escalation therefore assumes runner-level isolation — one LabVIEW CI
+> job at a time on the machine — and cannot provide it.
 
 ## Pre-works
 
@@ -140,11 +150,11 @@ Add this customer-action to `steps` session in github actions yml file.
         Architecture: [optional, x86 or x64, x86 as default]
         OperationVIFolder: [optional, use lvCICD action path as default, set to ${{ github.workspace }} for searching operations in your repo]
         StartupTimeout: [optional, max seconds to wait for the LabVIEW VI Server port to accept connections before invoking LabVIEWCLI, 120 as default]
-        MaxRetries: [optional, how many times to retry LabVIEWCLI when it fails with the transient error code 66, 3 as default]
-        RetryDelay: [optional, seconds to wait between error-66 retries, 10 as default]
-        RestartOnError66: [optional, stop the process holding the VI Server port and start a fresh LabVIEW instance when error 66 keeps repeating, false as default]
+        MaxRetries: [optional, how many times to retry LabVIEWCLI when it fails with a transient communication error (error 66 / -350000), 3 as default]
+        RetryDelay: [optional, seconds to wait between transient-failure retries, 10 as default]
+        RestartOnError66: [optional, stop the process holding the VI Server port and start a fresh LabVIEW instance when error 66 keeps repeating; only a process verified as the targeted LabVIEW is stopped, false as default]
         RestartAfterFailures: [optional, consecutive transient failures before the restart, 2 as default]
-        RestartOnConnectFailure: [optional, same restart for the connect error -350000, true as default]
+        RestartOnConnectFailure: [optional, same restart for the connect error -350000; only a process verified as the targeted LabVIEW is stopped, true as default]
 
 **Example 1**: use `lvEcho` to check runner/agent ready for lvCICD tools.
 

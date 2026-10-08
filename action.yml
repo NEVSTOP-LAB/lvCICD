@@ -67,15 +67,15 @@ inputs:
     required: false
     default: "120"
   MaxRetries:
-    description: "How many times to retry LabVIEWCLI when it fails with the transient error code 66 (communication call error in ProxyCaller)"
+    description: "How many times to retry LabVIEWCLI when it fails with a transient communication error (`Error code : 66` or `Error code : -350000`)"
     required: false
     default: "3"
   RetryDelay:
-    description: "Seconds to wait between error-66 retries"
+    description: "Seconds to wait between transient-failure retries (`Error code : 66` / `Error code : -350000`)"
     required: false
     default: "10"
   RestartOnError66:
-    description: "When error 66 keeps repeating, stop the process holding the VI Server port and start a fresh LabVIEW instance before retrying. Restarting a VI Server instance also interrupts concurrent jobs that share it, so this is off by default."
+    description: "When error 66 keeps repeating, stop the process holding the VI Server port and start a fresh LabVIEW instance before retrying. Only a process verified as the targeted LabVIEW is stopped; another LabVIEW build, an unrelated service holding the port and an unreadable owner path are reported and left running. Restarting a VI Server instance also interrupts concurrent jobs that share it, so this is off by default."
     required: false
     default: "false"
   RestartAfterFailures:
@@ -83,7 +83,7 @@ inputs:
     required: false
     default: "2"
   RestartOnConnectFailure:
-    description: "When the connect error -350000 keeps repeating, stop the process holding the VI Server port and start a fresh LabVIEW instance before retrying. This covers a port held by a process that is not the targeted VI Server. Concurrent LabVIEWCLI processes make the restart be skipped."
+    description: "When the connect error -350000 keeps repeating, stop the process holding the VI Server port and start a fresh LabVIEW instance before retrying. This covers a port held by a process that is not the targeted VI Server. Only a process verified as the targeted LabVIEW is stopped; another LabVIEW build, an unrelated service holding the port and an unreadable owner path are reported and left running. Concurrent LabVIEWCLI processes make the restart be skipped."
     required: false
     default: "true"
 outputs:
