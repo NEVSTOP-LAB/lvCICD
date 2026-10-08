@@ -21,7 +21,7 @@ jobs:
         shell: powershell
 
       - name: Run lvCICD Test cases with VITester
-        uses: NEVSTOP-LAB/lvCICD@main
+        uses: ./
         with:
           LabVIEW_Version: 2017
           Operation: StartVITester
